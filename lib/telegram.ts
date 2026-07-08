@@ -32,7 +32,8 @@ export async function sendDocument(
   const form = new FormData();
   form.append("chat_id", String(chatId));
   if (caption) form.append("caption", caption);
-  form.append("document", new Blob([fileBuffer]), filename);
+  // form.append("document", new Blob([fileBuffer]), filename);
+  form.append("document", new Blob([new Uint8Array(fileBuffer)]), filename);
 
   const res = await fetch(`${API}/sendDocument`, { method: "POST", body: form });
   if (!res.ok) {
