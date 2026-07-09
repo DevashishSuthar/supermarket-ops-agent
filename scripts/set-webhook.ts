@@ -1,3 +1,4 @@
+import "dotenv/config";
 /**
  * Run once after deploying: `npm run set-webhook`
  * Tells Telegram where to send updates, and sets the secret token

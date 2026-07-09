@@ -57,7 +57,7 @@ export async function receiveStock(input: { productQuery: string; qty: number; c
 
   return db.$transaction(async (tx) => {
     const rows = await tx.$queryRaw<{ id: string }[]>`
-      SELECT id FROM "Product"
+      SELECT id FROM "products"
       WHERE sku ILIKE ${input.productQuery} OR name ILIKE ${'%' + input.productQuery + '%'}
       LIMIT 1
       FOR UPDATE
@@ -116,7 +116,7 @@ export async function decrementStockForSaleTx(
   qty: number
 ) {
   const rows = await tx.$queryRaw<{ id: string; qty: Prisma.Decimal }[]>`
-    SELECT id, qty FROM "Product" WHERE id = ${productId} FOR UPDATE
+    SELECT id, qty FROM "products" WHERE id = ${productId} FOR UPDATE
   `;
   if (rows.length === 0) throw new ToolError("Product no longer exists.");
   const available = Number(rows[0].qty);

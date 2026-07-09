@@ -28,6 +28,8 @@ model Product {
 
   billItems BillItem[]
   stockIns  StockIn[]
+
+  @@map("products")
 }
 
 model StockIn {
@@ -37,6 +39,8 @@ model StockIn {
   qty       Decimal  @db.Decimal(10, 3)
   costPrice Decimal  @db.Decimal(10, 2)
   createdAt DateTime @default(now())
+
+  @@map("stock_ins")
 }
 
 model Customer {
@@ -46,6 +50,8 @@ model Customer {
   balance   Decimal      @db.Decimal(10, 2) @default(0) // > 0 => customer owes the shop
   createdAt DateTime     @default(now())
   ledger    KhataEntry[]
+
+  @@map("customers")
 }
 
 model KhataEntry {
@@ -56,6 +62,8 @@ model KhataEntry {
   amount     Decimal  @db.Decimal(10, 2)
   note       String?
   createdAt  DateTime @default(now())
+
+  @@map("khata_entries")
 }
 
 model Bill {
@@ -72,6 +80,8 @@ model Bill {
   finalizedAt  DateTime?
   createdAt    DateTime   @default(now())
   items        BillItem[]
+
+  @@map("bills")
 }
 
 model BillItem {
@@ -87,6 +97,8 @@ model BillItem {
   lineCgst     Decimal @db.Decimal(10, 2)
   lineSgst     Decimal @db.Decimal(10, 2)
   lineTotal    Decimal @db.Decimal(10, 2)
+
+  @@map("bill_items")
 }
 
 // Standing owner preferences — this is the "memory outside the context
@@ -99,6 +111,7 @@ model Preference {
   updatedAt DateTime @updatedAt
 
   @@unique([chatId, key])
+  @@map("preferences")
 }
 
 // Telegram redelivers updates at-least-once. We insert the update_id
@@ -107,6 +120,8 @@ model ProcessedUpdate {
   id        String   @id @default(cuid())
   updateId  String   @unique
   createdAt DateTime @default(now())
+
+  @@map("processed_updates")
 }
 
 // Tracks the in-progress draft bill per chat so a multi-turn bill
@@ -116,4 +131,6 @@ model ConversationState {
   chatId      String   @id
   draftBillId String?
   updatedAt   DateTime @updatedAt
+
+  @@map("conversation_states")
 }

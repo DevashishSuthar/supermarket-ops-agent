@@ -142,7 +142,7 @@ export async function finalizeBill(
     // already FINALIZED, this is a retry — return the existing result
     // instead of processing again.
     const rows = await tx.$queryRaw<{ id: string; status: string }[]>`
-      SELECT id, status FROM "Bill" WHERE id = ${bill.id} FOR UPDATE
+      SELECT id, status FROM "bills" WHERE id = ${bill.id} FOR UPDATE
     `;
     if (rows.length === 0) throw new ToolError("Bill not found.");
     if (rows[0].status === "FINALIZED") {
