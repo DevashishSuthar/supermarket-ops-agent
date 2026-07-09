@@ -28,6 +28,104 @@ const SHOP_INFO = {
 
 const MAX_HISTORY_MESSAGES = 20; // ~10 turns — enough context, bounded token cost
 
+const getProductSchema = z.object({
+  query: z.string().describe("product name or SKU as the owner typed it"),
+});
+
+type GetProductArgs = z.infer<typeof getProductSchema>;
+
+const addProductSchema = z.object({
+  sku: z.string(),
+  name: z.string(),
+  unit: z.enum(["kg", "g", "litre", "ml", "packet", "dozen", "piece"]),
+  isLoose: z.boolean().optional(),
+  costPrice: z.number(),
+  mrp: z.number(),
+  hsn: z.string().describe("HSN code for this product"),
+  gstSlab: z.number().describe("GST % slab: 0, 5, 12, or 18"),
+  initialQty: z.number().optional(),
+  reorderLevel: z.number().optional(),
+});
+
+type AddProductArgs = z.infer<typeof addProductSchema>;
+
+const receiveStockSchema = z.object({
+  productQuery: z.string(),
+  qty: z.number(),
+  costPrice: z.number().optional(),
+  mrp: z.number().optional(),
+});
+
+type ReceiveStockArgs = z.infer<typeof receiveStockSchema>;
+
+const addItemSchema = z.object({
+  productQuery: z.string(),
+  qty: z.number(),
+});
+
+type AddItemArgs = z.infer<typeof addItemSchema>;
+
+const removeItemSchema = z.object({
+  productQuery: z.string(),
+});
+
+type RemoveItemArgs = z.infer<typeof removeItemSchema>;
+
+const finalizeBillSchema = z.object({
+  paymentMode: z.enum(["CASH", "UPI", "CARD"]),
+  paymentRef: z.string().optional().describe("UPI ref / card auth code if given"),
+});
+
+type FinalizeBillArgs = z.infer<typeof finalizeBillSchema>;
+
+const addCreditSchema = z.object({
+  customerName: z.string(),
+  amount: z.number(),
+  note: z.string().optional()
+});
+
+type AddCreditArgs = z.infer<typeof addCreditSchema>;
+
+const recordKhataPaymentSchema = z.object({
+  customerName: z.string(),
+  amount: z.number(),
+});
+
+type RecordKhataPaymentArgs = z.infer<typeof recordKhataPaymentSchema>;
+
+const getKhataBalanceSchema = z.object({
+  customerName: z.string(),
+});
+
+type GetKhataBalanceArgs = z.infer<typeof getKhataBalanceSchema>;
+
+const dailyCloseSchema = z.object({
+  date: z.string().optional().describe("ISO date, defaults to today")
+});
+
+type DailyCloseArgs = z.infer<typeof dailyCloseSchema>;
+
+const generateInvoicePdfSchema = z.object({
+  billId: z.string()
+});
+
+type GenerateInvoicePdfArgs = z.infer<typeof generateInvoicePdfSchema>;
+
+const generateAnalysisDeckSchema = z.object({
+  startDate: z.string().describe("ISO date, start of range"),
+  endDate: z.string().describe("ISO date, end of range"),
+  label: z.string().describe("human label like 'This Week'"),
+});
+
+type GenerateAnalysisDeckArgs = z.infer<typeof generateAnalysisDeckSchema>;
+
+const setPreferenceSchema = z.object({
+  key: z.string(),
+  value: z.string()
+});
+
+type SetPreferenceArgs = z.infer<typeof setPreferenceSchema>;
+
 /**
  * Agent-first design: EVERY one of these tools is a thin, single-purpose
  * function. There is no keyword router deciding "this is a billing
@@ -48,36 +146,20 @@ function buildTools(chatId: string) {
   return {
     getProduct: tool({
       description: "Look up a product's price, stock, GST slab, etc. by name or SKU.",
-      inputSchema: z.object({ query: z.string().describe("product name or SKU as the owner typed it") }),
-      execute: async ({ query }) => wrap(() => inventory.checkStock(query)),
+      inputSchema: getProductSchema,
+      execute: async ({ query }: GetProductArgs) => wrap(() => inventory.checkStock(query)),
     }),
 
     addProduct: tool({
       description: "Register a brand-new product/SKU that doesn't exist yet.",
-      inputSchema: z.object({
-        sku: z.string(),
-        name: z.string(),
-        unit: z.enum(["kg", "g", "litre", "ml", "packet", "dozen", "piece"]),
-        isLoose: z.boolean().optional(),
-        costPrice: z.number(),
-        mrp: z.number(),
-        hsn: z.string().describe("HSN code for this product"),
-        gstSlab: z.number().describe("GST % slab: 0, 5, 12, or 18"),
-        initialQty: z.number().optional(),
-        reorderLevel: z.number().optional(),
-      }),
-      execute: async (input) => wrap(() => inventory.addProduct(input)),
+      inputSchema: addProductSchema,
+      execute: async (input: AddProductArgs) => wrap(() => inventory.addProduct(input)),
     }),
 
     receiveStock: tool({
       description: "Record incoming stock for an EXISTING product (e.g. '50 packets of Maggi came in, cost 12').",
-      inputSchema: z.object({
-        productQuery: z.string(),
-        qty: z.number(),
-        costPrice: z.number().optional(),
-        mrp: z.number().optional(),
-      }),
-      execute: async (input) => wrap(() => inventory.receiveStock(input)),
+      inputSchema: receiveStockSchema,
+      execute: async (input: ReceiveStockArgs) => wrap(() => inventory.receiveStock(input)),
     }),
 
     lowStockReport: tool({
@@ -94,14 +176,14 @@ function buildTools(chatId: string) {
 
     addItemToBill: tool({
       description: "Add (or update the quantity of) one item on the CURRENT draft bill. Call once per distinct item.",
-      inputSchema: z.object({ productQuery: z.string(), qty: z.number() }),
-      execute: async ({ productQuery, qty }) => wrap(() => billing.addItemToBill(chatId, productQuery, qty)),
+      inputSchema: addItemSchema,
+      execute: async ({ productQuery, qty }: AddItemArgs) => wrap(() => billing.addItemToBill(chatId, productQuery, qty)),
     }),
 
     removeItemFromBill: tool({
       description: "Remove an item entirely from the current draft bill.",
-      inputSchema: z.object({ productQuery: z.string() }),
-      execute: async ({ productQuery }) => wrap(() => billing.removeItemFromBill(chatId, productQuery)),
+      inputSchema: removeItemSchema,
+      execute: async ({ productQuery }: RemoveItemArgs) => wrap(() => billing.removeItemFromBill(chatId, productQuery)),
     }),
 
     viewDraftBill: tool({
@@ -113,42 +195,39 @@ function buildTools(chatId: string) {
     finalizeBill: tool({
       description:
         "Finalize (close out) the current draft bill: decrements stock, computes final GST totals, records payment mode. This is the ONLY point stock actually decrements.",
-      inputSchema: z.object({
-        paymentMode: z.enum(["CASH", "UPI", "CARD"]),
-        paymentRef: z.string().optional().describe("UPI ref / card auth code if given"),
-      }),
-      execute: async ({ paymentMode, paymentRef }) =>
+      inputSchema: finalizeBillSchema,
+      execute: async ({ paymentMode, paymentRef }: FinalizeBillArgs) =>
         wrap(() => billing.finalizeBill(chatId, paymentMode, paymentRef)),
     }),
 
     addCredit: tool({
       description: "Put an amount on a customer's khata (credit) tab.",
-      inputSchema: z.object({ customerName: z.string(), amount: z.number(), note: z.string().optional() }),
-      execute: async ({ customerName, amount, note }) => wrap(() => khata.addCredit(customerName, amount, note)),
+      inputSchema: addCreditSchema,
+      execute: async ({ customerName, amount, note }: AddCreditArgs) => wrap(() => khata.addCredit(customerName, amount, note)),
     }),
 
     recordKhataPayment: tool({
       description: "Record a customer paying down their khata balance.",
-      inputSchema: z.object({ customerName: z.string(), amount: z.number() }),
-      execute: async ({ customerName, amount }) => wrap(() => khata.recordPayment(customerName, amount)),
+      inputSchema: recordKhataPaymentSchema,
+      execute: async ({ customerName, amount }: RecordKhataPaymentArgs) => wrap(() => khata.recordPayment(customerName, amount)),
     }),
 
     getKhataBalance: tool({
       description: "Check a customer's current khata (credit) balance.",
-      inputSchema: z.object({ customerName: z.string() }),
-      execute: async ({ customerName }) => wrap(() => khata.getBalance(customerName)),
+      inputSchema: getKhataBalanceSchema,
+      execute: async ({ customerName }: GetKhataBalanceArgs) => wrap(() => khata.getBalance(customerName)),
     }),
 
     dailyClose: tool({
       description: "Summarize today's (or a given date's) sales: totals, tax collected, payment mode split, top items.",
-      inputSchema: z.object({ date: z.string().optional().describe("ISO date, defaults to today") }),
-      execute: async ({ date }) => wrap(() => reports.dailyClose(date ? new Date(date) : new Date())),
+      inputSchema: dailyCloseSchema,
+      execute: async ({ date }: DailyCloseArgs) => wrap(() => reports.dailyClose(date ? new Date(date) : new Date())),
     }),
 
     generateInvoicePdf: tool({
       description: "Generate and SEND a GST-correct PDF invoice for a finalized bill directly to the owner's chat.",
-      inputSchema: z.object({ billId: z.string() }),
-      execute: async ({ billId }) =>
+      inputSchema: generateInvoicePdfSchema,
+      execute: async ({ billId }: GenerateInvoicePdfArgs) =>
         wrap(async () => {
           const bill = await db.bill.findUnique({ where: { id: billId }, include: { items: { include: { product: true } } } });
           if (!bill) throw new ToolError("Bill not found.");
@@ -181,12 +260,8 @@ function buildTools(chatId: string) {
 
     generateAnalysisDeck: tool({
       description: "Generate and SEND a PPTX sales analysis deck with charts for a date range.",
-      inputSchema: z.object({
-        startDate: z.string().describe("ISO date, start of range"),
-        endDate: z.string().describe("ISO date, end of range"),
-        label: z.string().describe("human label like 'This Week'"),
-      }),
-      execute: async ({ startDate, endDate, label }) =>
+      inputSchema: generateAnalysisDeckSchema,
+      execute: async ({ startDate, endDate, label }: GenerateAnalysisDeckArgs) =>
         wrap(async () => {
           const bills = await reports.salesForRange(new Date(startDate), new Date(endDate));
           const lowStock = await inventory.lowStockReport();
@@ -210,8 +285,8 @@ function buildTools(chatId: string) {
     setPreference: tool({
       description:
         "Remember a standing owner preference (default payment mode, preferred brand, shop name/GSTIN) that must persist across chats.",
-      inputSchema: z.object({ key: z.string(), value: z.string() }),
-      execute: async ({ key, value }) => wrap(() => setPreference(chatId, key, value)),
+      inputSchema: setPreferenceSchema,
+      execute: async ({ key, value }: SetPreferenceArgs) => wrap(() => setPreference(chatId, key, value)),
     }),
   };
 }
@@ -246,8 +321,8 @@ async function saveHistory(chatId: string, history: ChatMessage[]) {
   const trimmed = history.slice(-MAX_HISTORY_MESSAGES);
   await db.conversationState.upsert({
     where: { chatId },
-    update: { history: trimmed as Prisma.InputJsonValue },
-    create: { chatId, history: trimmed as Prisma.InputJsonValue },
+    update: { history: trimmed as unknown as Prisma.InputJsonValue },
+    create: { chatId, history: trimmed as unknown as Prisma.InputJsonValue },
   });
 }
 
@@ -259,8 +334,8 @@ async function saveHistory(chatId: string, history: ChatMessage[]) {
 export async function resetConversationHistory(chatId: string) {
   await db.conversationState.upsert({
     where: { chatId },
-    update: { history: [] as Prisma.InputJsonValue },
-    create: { chatId, history: [] as Prisma.InputJsonValue },
+    update: { history: [] as unknown as Prisma.InputJsonValue },
+    create: { chatId, history: [] as unknown as Prisma.InputJsonValue },
   });
 }
 
