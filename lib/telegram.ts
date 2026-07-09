@@ -20,7 +20,8 @@ export async function sendMessage(chatId: number | string, text: string) {
   if (!res.ok) {
     console.error("sendMessage failed", await res.text());
   }
-  return res.json();
+  const data = await res.json();
+  return data;
 }
 
 export async function sendDocument(

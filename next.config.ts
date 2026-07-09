@@ -2,10 +2,10 @@ import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
   serverExternalPackages:[
-      "@prisma/client",
-      "pdfkit",
-      "pptxgenjs",
-    ]
+    "@prisma/client",
+    "pdf-lib",
+    "pptxgenjs",
+  ]
 };
 
 export default nextConfig;

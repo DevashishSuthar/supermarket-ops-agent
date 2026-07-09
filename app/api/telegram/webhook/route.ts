@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { TelegramUpdate, sendMessage } from "@/lib/telegram";
 import { claimUpdateOnce } from "@/lib/idempotency";
-import { runAgentTurn } from "@/lib/agent";
+import { runAgentTurn, resetConversationHistory } from "@/lib/agent";
 
 export const maxDuration = 60; // agent turns with multiple tool calls can take a bit
 
@@ -34,6 +34,15 @@ export async function POST(req: NextRequest) {
 
   if (!text) {
     await sendMessage(chatId, "I only understand text for now — please type your request.");
+    return NextResponse.json({ ok: true });
+  }
+
+  // Explicit "new chat" signal — clears short-term conversation memory only.
+  // Standing preferences (lib/tools/preferences.ts) are untouched, which is
+  // exactly what hard-part #9 requires you to demonstrate.
+  if (text.trim().toLowerCase() === "/new") {
+    await resetConversationHistory(String(chatId));
+    await sendMessage(chatId, "Started a new chat. Your standing preferences still apply.");
     return NextResponse.json({ ok: true });
   }
 

@@ -1,4 +1,6 @@
-import { anthropic } from "@ai-sdk/anthropic";
+// import { anthropic } from "@ai-sdk/anthropic";
+import { groq } from "@ai-sdk/groq";
+import { Prisma } from "@prisma/client";
 import { generateText, tool, stepCountIs } from "ai";
 import { z } from "zod";
 
@@ -7,17 +9,24 @@ import * as inventory from "./tools/inventory";
 import * as billing from "./tools/billing";
 import * as khata from "./tools/khata";
 import * as reports from "./tools/reports";
-// import { generateInvoicePdf } from "./documents/invoice";
+import { generateInvoicePdf } from "./documents/invoice";
 import { generateAnalysisDeck } from "./documents/deck";
 import { sendDocument } from "./telegram";
 import { db } from "./db";
 import { ToolError } from "./tools/inventory";
+
+interface ChatMessage {
+  role: "user" | "assistant";
+  content: string;
+}
 
 const SHOP_INFO = {
   name: process.env.SHOP_NAME ?? "My Kirana Store",
   gstin: process.env.SHOP_GSTIN,
   address: process.env.SHOP_ADDRESS,
 };
+
+const MAX_HISTORY_MESSAGES = 20; // ~10 turns — enough context, bounded token cost
 
 /**
  * Agent-first design: EVERY one of these tools is a thin, single-purpose
@@ -143,29 +152,29 @@ function buildTools(chatId: string) {
         wrap(async () => {
           const bill = await db.bill.findUnique({ where: { id: billId }, include: { items: { include: { product: true } } } });
           if (!bill) throw new ToolError("Bill not found.");
-          // const pdf = await generateInvoicePdf(
-          //   {
-          //     id: bill.id,
-          //     finalizedAt: bill.finalizedAt,
-          //     paymentMode: bill.paymentMode,
-          //     subtotal: Number(bill.subtotal),
-          //     cgst: Number(bill.cgst),
-          //     sgst: Number(bill.sgst),
-          //     total: Number(bill.total),
-          //     items: bill.items.map((i) => ({
-          //       qty: Number(i.qty),
-          //       unitPrice: Number(i.unitPrice),
-          //       gstSlab: Number(i.gstSlab),
-          //       lineSubtotal: Number(i.lineSubtotal),
-          //       lineCgst: Number(i.lineCgst),
-          //       lineSgst: Number(i.lineSgst),
-          //       lineTotal: Number(i.lineTotal),
-          //       product: i.product,
-          //     })),
-          //   },
-          //   SHOP_INFO
-          // );
-          // await sendDocument(chatId, pdf, `invoice-${bill.id}.pdf`, "Here's the invoice.");
+          const pdf = await generateInvoicePdf(
+            {
+              id: bill.id,
+              finalizedAt: bill.finalizedAt,
+              paymentMode: bill.paymentMode,
+              subtotal: Number(bill.subtotal),
+              cgst: Number(bill.cgst),
+              sgst: Number(bill.sgst),
+              total: Number(bill.total),
+              items: bill.items.map((i) => ({
+                qty: Number(i.qty),
+                unitPrice: Number(i.unitPrice),
+                gstSlab: Number(i.gstSlab),
+                lineSubtotal: Number(i.lineSubtotal),
+                lineCgst: Number(i.lineCgst),
+                lineSgst: Number(i.lineSgst),
+                lineTotal: Number(i.lineTotal),
+                product: i.product,
+              })),
+            },
+            SHOP_INFO
+          );
+          await sendDocument(chatId, pdf, `invoice-${bill.id}.pdf`, "Here's the invoice.");
           return { sent: true };
         }),
     }),
@@ -212,11 +221,48 @@ const SYSTEM_PROMPT = `You are the ops brain for an Indian kirana (grocery) stor
 Rules you must follow:
 - NEVER invent a product, price, stock quantity, or GST slab. Always call a tool to look it up. If a tool returns an error, relay it plainly — don't work around it.
 - If a request is genuinely ambiguous (e.g. "add atta" when multiple atta products exist, or none do), ASK a short clarifying question instead of guessing.
+- If the owner names a SPECIFIC product/size/variant (e.g. "Aashirvaad atta 5kg") that does NOT exactly match any existing product, do NOT silently substitute the closest match (e.g. a 1kg pack). Tell them plainly that exact item isn't in stock, name what similar items DO exist, and ask which one they mean. Never assume a different size/variant is "close enough."
+- When adding a NEW product via addProduct: packaged/branded items (atta, salt, butter, oil, packets of any FMCG good) should almost always use unit "packet" or "piece" with isLoose: false, and quantity should mean number of packets — not the product's internal weight/volume. Only genuinely loose commodities sold by weight (loose sugar, rice, dal, etc.) should use unit "kg"/"g"/"litre"/"ml" with isLoose: true. If you're not sure which applies, ask rather than guessing.
+- Do not state a specific number (GST slab, price, HSN code, etc.) as if it's already decided before the owner has actually given it or a tool has confirmed it. If you don't have a real value yet, ask for it plainly instead of writing a provisional-sounding figure.
+- When summarizing a bill's tax in chat, never show a single blended tax percentage (e.g. "12.6%") across multiple GST slabs — show each item's own GST% and CGST/SGST amounts separately, since that's what's legally required on the actual invoice too.
 - A bill is built up over multiple messages. Use addItemToBill / removeItemFromBill as items are mentioned, viewDraftBill to show progress, and finalizeBill only when the owner clearly says to close it out (e.g. "make the bill", "that's it", gives a payment mode).
 - Stock only decrements at finalizeBill — never before.
 - Speak in short, plain, shopkeeper-friendly language. Use ₹ for money. Confirm important actions (finalizing a bill, recording a large credit) briefly.
 - When the owner asks for an invoice or analysis deck, call the relevant tool — it sends the file directly, you don't need to describe the file's contents in detail, just confirm it's sent.
 `;
+
+async function loadHistory(chatId: string): Promise<ChatMessage[]> {
+  const state = await db.conversationState.findUnique({ where: { chatId } });
+  if (!state?.history) return [];
+  try {
+    const parsed = state.history as unknown as ChatMessage[];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+async function saveHistory(chatId: string, history: ChatMessage[]) {
+  const trimmed = history.slice(-MAX_HISTORY_MESSAGES);
+  await db.conversationState.upsert({
+    where: { chatId },
+    update: { history: trimmed as Prisma.InputJsonValue },
+    create: { chatId, history: trimmed as Prisma.InputJsonValue },
+  });
+}
+
+/**
+ * Clears short-term conversation memory only — NOT standing preferences.
+ * Wire this to a "/new" command so the demo's "/new chat, preferences
+ * still apply" step has something real to show.
+ */
+export async function resetConversationHistory(chatId: string) {
+  await db.conversationState.upsert({
+    where: { chatId },
+    update: { history: [] as Prisma.InputJsonValue },
+    create: { chatId, history: [] as Prisma.InputJsonValue },
+  });
+}
 
 export async function runAgentTurn(chatId: string, userText: string): Promise<string> {
   const prefs = await getPreferences(chatId);
@@ -227,14 +273,26 @@ export async function runAgentTurn(chatId: string, userText: string): Promise<st
           .join("\n")}`
       : "";
 
+  const history = await loadHistory(chatId);
+
   const result = await generateText({
-    model: anthropic("claude-sonnet-4-6"),
+    // model: anthropic("claude-sonnet-4-6"),
+    // model: groq("llama-3.3-70b-versatile"),
+    model: groq("openai/gpt-oss-120b"),
     system: SYSTEM_PROMPT + prefsBlock,
-    prompt: userText,
+    messages: [...history, { role: "user", content: userText }],
     tools: buildTools(chatId),
     stopWhen: stepCountIs(8),
     // maxSteps: 8, // allows chaining multiple tool calls in one turn (observe -> reason -> act -> repeat)
   });
 
-  return result.text || "Done.";
+  const replyText = result.text || "Done.";
+
+  await saveHistory(chatId, [
+    ...history,
+    { role: "user", content: userText },
+    { role: "assistant", content: replyText },
+  ]);
+
+  return replyText;
 }
