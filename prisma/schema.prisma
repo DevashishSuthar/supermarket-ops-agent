@@ -1,0 +1,136 @@
+// Supermarket Ops Agent — data model
+// Postgres is required (not SQLite) because we rely on row locking
+// (SELECT ... FOR UPDATE) inside transactions to solve the concurrency
+// hard-part (two bills / a bill + a stock-in in flight at once).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Product {
+  id           String   @id @default(cuid())
+  sku          String   @unique
+  name         String
+  unit         String   // kg | g | litre | ml | packet | dozen | piece
+  isLoose      Boolean  @default(false)
+  costPrice    Decimal  @db.Decimal(10, 2)
+  mrp          Decimal  @db.Decimal(10, 2)
+  qty          Decimal  @db.Decimal(10, 3) @default(0)
+  reorderLevel Decimal  @db.Decimal(10, 3) @default(0)
+  hsn          String
+  gstSlab      Decimal  @db.Decimal(4, 2) // 0, 5, 12, 18 ...
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  billItems BillItem[]
+  stockIns  StockIn[]
+
+  @@map("products")
+}
+
+model StockIn {
+  id        String   @id @default(cuid())
+  productId String
+  product   Product  @relation(fields: [productId], references: [id])
+  qty       Decimal  @db.Decimal(10, 3)
+  costPrice Decimal  @db.Decimal(10, 2)
+  createdAt DateTime @default(now())
+
+  @@map("stock_ins")
+}
+
+model Customer {
+  id        String       @id @default(cuid())
+  name      String       @unique
+  phone     String?
+  balance   Decimal      @db.Decimal(10, 2) @default(0) // > 0 => customer owes the shop
+  createdAt DateTime     @default(now())
+  ledger    KhataEntry[]
+
+  @@map("customers")
+}
+
+model KhataEntry {
+  id         String   @id @default(cuid())
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id])
+  type       String   // "CREDIT" (customer bought/borrowed on credit) | "PAYMENT" (customer paid down balance)
+  amount     Decimal  @db.Decimal(10, 2)
+  note       String?
+  createdAt  DateTime @default(now())
+
+  @@map("khata_entries")
+}
+
+model Bill {
+  id           String     @id @default(cuid())
+  chatId       String
+  status       String     @default("DRAFT") // DRAFT | FINALIZED | CANCELLED
+  paymentMode  String?    // CASH | UPI | CARD
+  paymentRef   String?
+  customerId   String?
+  subtotal     Decimal    @db.Decimal(10, 2) @default(0)
+  cgst         Decimal    @db.Decimal(10, 2) @default(0)
+  sgst         Decimal    @db.Decimal(10, 2) @default(0)
+  total        Decimal    @db.Decimal(10, 2) @default(0)
+  finalizedAt  DateTime?
+  createdAt    DateTime   @default(now())
+  items        BillItem[]
+
+  @@map("bills")
+}
+
+model BillItem {
+  id           String  @id @default(cuid())
+  billId       String
+  bill         Bill    @relation(fields: [billId], references: [id])
+  productId    String
+  product      Product @relation(fields: [productId], references: [id])
+  qty          Decimal @db.Decimal(10, 3)
+  unitPrice    Decimal @db.Decimal(10, 2)
+  gstSlab      Decimal @db.Decimal(4, 2)
+  lineSubtotal Decimal @db.Decimal(10, 2)
+  lineCgst     Decimal @db.Decimal(10, 2)
+  lineSgst     Decimal @db.Decimal(10, 2)
+  lineTotal    Decimal @db.Decimal(10, 2)
+
+  @@map("bill_items")
+}
+
+// Standing owner preferences — this is the "memory outside the context
+// window" requirement. Keyed per chat so it survives /new chat.
+model Preference {
+  id        String   @id @default(cuid())
+  chatId    String
+  key       String
+  value     String
+  updatedAt DateTime @updatedAt
+
+  @@unique([chatId, key])
+  @@map("preferences")
+}
+
+// Telegram redelivers updates at-least-once. We insert the update_id
+// BEFORE processing; a unique-constraint failure means "already handled".
+model ProcessedUpdate {
+  id        String   @id @default(cuid())
+  updateId  String   @unique
+  createdAt DateTime @default(now())
+
+  @@map("processed_updates")
+}
+
+// Tracks the in-progress draft bill per chat so a multi-turn bill
+// ("add this" -> "remove that" -> "finalize") survives across messages
+// without relying on LLM conversation memory.
+model ConversationState {
+  chatId      String   @id
+  draftBillId String?
+  updatedAt   DateTime @updatedAt
+
+  @@map("conversation_states")
+}
