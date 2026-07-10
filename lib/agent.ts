@@ -165,13 +165,37 @@ function buildTools(chatId: string) {
     addProduct: tool({
       description: "Register a brand-new product/SKU that doesn't exist yet.",
       inputSchema: addProductSchema,
-      execute: async (input: AddProductArgs) => wrap(() => inventory.addProduct(input)),
+      // addProductSchema uses .nullish() on isLoose/initialQty/reorderLevel so the
+      // model can explicitly pass `null`, but inventory.addProduct's parameter type
+      // only allows `undefined` for these optional fields (no `null`). Normalize
+      // null -> undefined here at the boundary rather than loosening the schema or
+      // inventory's type, since `null` from the LLM never carries distinct meaning
+      // from "not provided" for these fields.
+      execute: async (input: AddProductArgs) =>
+        wrap(() =>
+          inventory.addProduct({
+            ...input,
+            isLoose: input.isLoose ?? undefined,
+            initialQty: input.initialQty ?? undefined,
+            reorderLevel: input.reorderLevel ?? undefined,
+          })
+        ),
     }),
 
     receiveStock: tool({
       description: "Record incoming stock for an EXISTING product (e.g. '50 packets of Maggi came in, cost 12').",
       inputSchema: receiveStockSchema,
-      execute: async (input: ReceiveStockArgs) => wrap(() => inventory.receiveStock(input)),
+      // Same null -> undefined normalization as addProduct: receiveStockSchema's
+      // .nullish() fields allow the model to send explicit null, but
+      // inventory.receiveStock's parameter type only allows undefined here.
+      execute: async (input: ReceiveStockArgs) =>
+        wrap(() =>
+          inventory.receiveStock({
+            ...input,
+            costPrice: input.costPrice ?? undefined,
+            mrp: input.mrp ?? undefined,
+          })
+        ),
     }),
 
     lowStockReport: tool({
@@ -209,13 +233,13 @@ function buildTools(chatId: string) {
         "Finalize (close out) the current draft bill: decrements stock, computes final GST totals, records payment mode. This is the ONLY point stock actually decrements.",
       inputSchema: finalizeBillSchema,
       execute: async ({ paymentMode, paymentRef }: FinalizeBillArgs) =>
-        wrap(() => billing.finalizeBill(chatId, paymentMode, paymentRef)),
+        wrap(() => billing.finalizeBill(chatId, paymentMode, paymentRef ?? undefined)),
     }),
 
     addCredit: tool({
       description: "Put an amount on a customer's khata (credit) tab.",
       inputSchema: addCreditSchema,
-      execute: async ({ customerName, amount, note }: AddCreditArgs) => wrap(() => khata.addCredit(customerName, amount, note)),
+      execute: async ({ customerName, amount, note }: AddCreditArgs) => wrap(() => khata.addCredit(customerName, amount, note ?? undefined)),
     }),
 
     recordKhataPayment: tool({
