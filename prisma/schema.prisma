@@ -130,6 +130,7 @@ model ProcessedUpdate {
 model ConversationState {
   chatId      String   @id
   draftBillId String?
+  history     Json     @default("[]")
   updatedAt   DateTime @updatedAt
 
   @@map("conversation_states")

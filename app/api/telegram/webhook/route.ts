@@ -1,48 +1,89 @@
 import { NextRequest, NextResponse } from "next/server";
-import { TelegramUpdate, sendMessage } from "@/lib/telegram";
+import { runAgentTurn, resetConversationHistory } from "@/lib/agent";
 import { claimUpdateOnce } from "@/lib/idempotency";
-import { runAgentTurn } from "@/lib/agent";
+import { TelegramUpdate, sendMessage, downloadVoiceFile } from "@/lib/telegram";
+import { transcribeVoice } from "@/lib/transcribe";
 
 export const maxDuration = 60; // agent turns with multiple tool calls can take a bit
+
+// Recognizes the model provider's rate-limit error (e.g. Groq's
+// "Rate limit reached ... tokens per day" / HTTP 429) so we can tell the
+// owner something actionable instead of a generic failure message.
+function isRateLimitError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /rate limit/i.test(msg) || /\b429\b/.test(msg) || /tokens per day/i.test(msg);
+}
 
 export async function POST(req: NextRequest) {
   // Verify the request really came from Telegram, not a random POST to
   // our public webhook URL.
   const secret = req.headers.get("x-telegram-bot-api-secret-token");
+  console.log("Received Telegram webhook request with secret:", secret);
   if (secret !== process.env.TELEGRAM_WEBHOOK_SECRET) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
 
   const update: TelegramUpdate = await req.json();
-
+  console.log("Received Telegram update:", update);
   // Hard part #5 (idempotency): Telegram retries webhook deliveries that
   // don't get a fast 200 OK. We claim the update_id atomically BEFORE
   // doing any work; if it's already claimed, we just ack and stop —
   // no double-processing, no double-reply.
   const isNew = await claimUpdateOnce(update.update_id);
+  console.log(`Update ${update.update_id} is new?`, isNew);
   if (!isNew) {
     return NextResponse.json({ ok: true, deduped: true });
   }
 
   const chatId = update.message?.chat.id;
-  const text = update.message?.text;
+  const voice = update.message?.voice;
+  let text = update.message?.text;
 
   if (!chatId) {
     // Non-message update (e.g. edited message, channel post) — ack and ignore.
     return NextResponse.json({ ok: true });
   }
 
+  if (voice) {
+    try {
+      const audio = await downloadVoiceFile(voice.file_id);
+      text = await transcribeVoice(audio);
+      await sendMessage(chatId, `🎙️ Heard: "${text}"`);
+    } catch (err) {
+      console.error("Voice transcription failed:", err);
+      await sendMessage(chatId, "Couldn't understand that voice note — try typing it, or send it again.");
+      return NextResponse.json({ ok: true });
+    }
+  }
+
   if (!text) {
-    await sendMessage(chatId, "I only understand text for now — please type your request.");
+    await sendMessage(chatId, "I only understand text and voice notes for now — please type or speak your request.");
+    return NextResponse.json({ ok: true });
+  }
+
+  // Explicit "new chat" signal — clears short-term conversation memory only.
+  // Standing preferences (lib/tools/preferences.ts) are untouched, which is
+  // exactly what hard-part #9 requires you to demonstrate.
+  if (text.trim().toLowerCase() === "/new") {
+    await resetConversationHistory(String(chatId));
+    await sendMessage(chatId, "Started a new chat. Your standing preferences still apply.");
     return NextResponse.json({ ok: true });
   }
 
   try {
     const reply = await runAgentTurn(String(chatId), text);
+    console.log("Agent turn result:", reply);
     await sendMessage(chatId, reply);
   } catch (err) {
     console.error("Agent turn failed:", err);
-    await sendMessage(chatId, "Something went wrong handling that — please try again.");
+    if (isRateLimitError(err)) {
+      await sendMessage(
+        chatId,
+        "⏳ I've hit my AI usage limit for the moment — please try again in a few minutes."
+      );
+    } else {
+      await sendMessage(chatId, "Something went wrong handling that — please try again.");
+    }
   }
 
   // Always return 200 fast so Telegram doesn't consider this a failed
