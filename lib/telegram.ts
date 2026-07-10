@@ -7,7 +7,11 @@ export interface TelegramUpdate {
     message_id: number;
     chat: { id: number };
     text?: string;
-    voice?: unknown;
+    voice?: {
+      file_id: string;
+      duration?: number;
+      mime_type?: string
+    };
   };
 }
 
@@ -41,4 +45,20 @@ export async function sendDocument(
     console.error("sendDocument failed", await res.text());
   }
   return res.json();
+}
+
+/**
+ * Resolves a Telegram file_id to actual bytes. Telegram only sends a
+ * file_id in the update — the audio itself needs a separate round trip
+ * via getFile -> the file server.
+ */
+export async function downloadVoiceFile(fileId: string): Promise<Buffer> {
+  const metaRes = await fetch(`${API}/getFile?file_id=${fileId}`);
+  const meta = await metaRes.json();
+  if (!meta.ok) throw new Error(`getFile failed: ${JSON.stringify(meta)}`);
+
+  const fileRes = await fetch(`https://api.telegram.org/file/bot${TOKEN}/${meta.result.file_path}`);
+  if (!fileRes.ok) throw new Error("Failed to download voice file from Telegram.");
+
+  return Buffer.from(await fileRes.arrayBuffer());
 }

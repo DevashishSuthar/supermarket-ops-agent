@@ -24,7 +24,19 @@ const SHOP_INFO = {
   name: process.env.SHOP_NAME ?? "My Kirana Store",
   gstin: process.env.SHOP_GSTIN,
   address: process.env.SHOP_ADDRESS,
+  // Stretch goal: "branded invoices" — optional hex like "#1a5276" in env,
+  // converted to the 0-1 RGB triple pdf-lib expects. Falls back to
+  // invoice.ts's own default teal if unset or malformed.
+  brandColor: parseHexColor(process.env.SHOP_BRAND_COLOR),
 };
+
+function parseHexColor(hex?: string): [number, number, number] | undefined {
+  if (!hex) return undefined;
+  const match = /^#?([0-9a-f]{6})$/i.exec(hex.trim());
+  if (!match) return undefined;
+  const int = parseInt(match[1], 16);
+  return [((int >> 16) & 255) / 255, ((int >> 8) & 255) / 255, (int & 255) / 255];
+}
 
 const MAX_HISTORY_MESSAGES = 20; // ~10 turns — enough context, bounded token cost
 
@@ -38,13 +50,13 @@ const addProductSchema = z.object({
   sku: z.string(),
   name: z.string(),
   unit: z.enum(["kg", "g", "litre", "ml", "packet", "dozen", "piece"]),
-  isLoose: z.boolean().optional(),
+  isLoose: z.boolean().nullish(),
   costPrice: z.number(),
   mrp: z.number(),
   hsn: z.string().describe("HSN code for this product"),
   gstSlab: z.number().describe("GST % slab: 0, 5, 12, or 18"),
-  initialQty: z.number().optional(),
-  reorderLevel: z.number().optional(),
+  initialQty: z.number().nullish(),
+  reorderLevel: z.number().nullish(),
 });
 
 type AddProductArgs = z.infer<typeof addProductSchema>;
@@ -52,8 +64,8 @@ type AddProductArgs = z.infer<typeof addProductSchema>;
 const receiveStockSchema = z.object({
   productQuery: z.string(),
   qty: z.number(),
-  costPrice: z.number().optional(),
-  mrp: z.number().optional(),
+  costPrice: z.number().nullish(),
+  mrp: z.number().nullish(),
 });
 
 type ReceiveStockArgs = z.infer<typeof receiveStockSchema>;
@@ -73,7 +85,7 @@ type RemoveItemArgs = z.infer<typeof removeItemSchema>;
 
 const finalizeBillSchema = z.object({
   paymentMode: z.enum(["CASH", "UPI", "CARD"]),
-  paymentRef: z.string().optional().describe("UPI ref / card auth code if given"),
+  paymentRef: z.string().nullish().describe("UPI ref / card auth code if given"),
 });
 
 type FinalizeBillArgs = z.infer<typeof finalizeBillSchema>;
@@ -81,7 +93,7 @@ type FinalizeBillArgs = z.infer<typeof finalizeBillSchema>;
 const addCreditSchema = z.object({
   customerName: z.string(),
   amount: z.number(),
-  note: z.string().optional()
+  note: z.string().nullish()
 });
 
 type AddCreditArgs = z.infer<typeof addCreditSchema>;
@@ -100,7 +112,7 @@ const getKhataBalanceSchema = z.object({
 type GetKhataBalanceArgs = z.infer<typeof getKhataBalanceSchema>;
 
 const dailyCloseSchema = z.object({
-  date: z.string().optional().describe("ISO date, defaults to today")
+  date: z.string().nullish().describe("ISO date, defaults to today")
 });
 
 type DailyCloseArgs = z.infer<typeof dailyCloseSchema>;
@@ -222,6 +234,20 @@ function buildTools(chatId: string) {
       description: "Summarize today's (or a given date's) sales: totals, tax collected, payment mode split, top items.",
       inputSchema: dailyCloseSchema,
       execute: async ({ date }: DailyCloseArgs) => wrap(() => reports.dailyClose(date ? new Date(date) : new Date())),
+    }),
+
+    reorderSuggestions: tool({
+      description:
+        "Get restock suggestions based on recent sales velocity, not just a fixed reorder level ('what should I reorder soon?', 'what's about to run out based on how fast it's selling?').",
+      inputSchema: z.object({}),
+      execute: async () => wrap(() => reports.reorderSuggestions()),
+    }),
+
+    getOutstandingKhata: tool({
+      description:
+        "List all customers who currently owe money on their khata (credit) tab, with balance and days since their last activity ('who owes me money?', 'khata pending list').",
+      inputSchema: z.object({}),
+      execute: async () => wrap(() => khata.listOutstandingKhata()),
     }),
 
     generateInvoicePdf: tool({
