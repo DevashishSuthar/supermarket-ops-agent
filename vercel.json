@@ -2,11 +2,11 @@
   "crons": [
     {
       "path": "/api/cron/weekly-deck",
-      "schedule": "0 9 * * MON"
+      "schedule": "30 3 * * 1"
     },
     {
       "path": "/api/cron/khata-reminders",
-      "schedule": "30 9 * * MON"
+      "schedule": "0 4 * * 1"
     }
   ]
 }
