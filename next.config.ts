@@ -4,8 +4,8 @@ const nextConfig: NextConfig = {
   serverExternalPackages:[
     "@prisma/client",
     "pdf-lib",
-    "pptxgenjs",
-  ]
+  ],
+  transpilePackages: ["pptxgenjs"],
 };
 
 export default nextConfig;
