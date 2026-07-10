@@ -21,8 +21,9 @@ is the product.
 7. [What the owner can do (capability map)](#what-the-owner-can-do-capability-map)
 8. [Setup & running it yourself](#setup--running-it-yourself)
 9. [Demo script](#demo-script)
-10. [Known limitations / what I'd harden next](#known-limitations--what-id-harden-next)
+10. [Stretch goals implemented](#stretch-goals-implemented)
 11. [Stretch goals not attempted](#stretch-goals-not-attempted)
+12. [Known limitations / what I'd harden next](#known-limitations--what-id-harden-next)
 
 ---
 
@@ -270,13 +271,70 @@ The recorded walkthrough covers, in order:
 
 ---
 
+## Stretch goals implemented
+
+Per the brief's §7, five of the eight optional stretch goals were built —
+each is a real, wired-in feature, not a stub:
+
+1. **Branded / templated invoice PDFs.** `invoice.ts` draws a colored
+   letterhead band and badge using a `brandColor` that's configurable per
+   shop via the `SHOP_BRAND_COLOR` env var (any `#rrggbb` hex, parsed in
+   `lib/agent.ts`'s `parseHexColor`), falling back to a sensible default
+   teal if unset or malformed. The tax-breakup table, totals box, and
+   footer all pick up the same brand color, so it reads as a designed
+   invoice rather than a generic table dump.
+2. **Scheduled weekly analysis deck, auto-sent.** `app/api/cron/weekly-deck/route.ts`
+   is triggered by Vercel Cron (configured in `vercel.json`) once a week. It
+   authenticates the incoming request via the `Authorization: Bearer
+   <CRON_SECRET>` header Vercel automatically sends, builds the same
+   `generateAnalysisDeck` artifact the owner can request on demand, and
+   pushes it straight to the owner's chat (`OWNER_CHAT_ID`) with no manual
+   trigger required.
+3. **Reorder suggestions from sales velocity.** `lib/tools/reports.ts`'s
+   `reorderSuggestions()` goes beyond the static `reorderLevel` threshold:
+   it looks at a rolling sales window (`windowDays`, default 14), computes
+   a daily sell-through rate per SKU, and projects whether current stock
+   will run out within `leadTimeDays` + `coverDays`. Each flagged product
+   carries a `reason` (`at_or_below_reorder_level` vs `projected_stockout`)
+   and a suggested reorder quantity sized to cover the configured buffer —
+   so "what should I reorder soon?" reflects how fast something is actually
+   selling, not just a fixed number set at product creation.
+4. **Voice-note orders.** `lib/transcribe.ts` transcribes incoming Telegram
+   voice notes via Groq's Whisper endpoint (`whisper-large-v3-turbo`). The
+   webhook route (`app/api/telegram/webhook/route.ts`) downloads the voice
+   file, transcribes it, echoes back what it heard (`🎙️ Heard: "..."`) for
+   owner confirmation, and then hands the transcribed text through the
+   *exact same* `runAgentTurn` path as a typed message — no separate voice
+   code path in the agent logic itself.
+5. **Khata payment reminders.** `app/api/cron/khata-reminders/route.ts`,
+   also driven by Vercel Cron and the same `CRON_SECRET` auth pattern as the
+   weekly deck, pulls outstanding khata balances and sends the owner a
+   weekly summary of who owes what, so follow-ups don't rely on the owner
+   remembering to ask.
+
+## Stretch goals not attempted
+
+Three of the eight remain unattempted (all optional per §7):
+
+- **Expiry / batch tracking with FEFO** — would need a `Batch` model
+  (expiry date, received date, qty) under each `Product` and FEFO-aware
+  decrement logic in `decrementStockForSaleTx`; not modeled in the current
+  schema.
+- **Multi-language (Hindi / Tamil)** — the agent currently only reasons and
+  replies in English; would need either a multilingual system prompt or a
+  translation pass on input/output.
+- **Barcode / product photo → identify item** — would need an image input
+  path (Telegram photo message → vision model or barcode decode → SKU
+  lookup); no image handling exists in the webhook route today (only text
+  and voice).
+
 ## Known limitations / what I'd harden next
 
 - **Model provider:** currently running on Groq (`openai/gpt-oss-120b`) for
   cost-free iteration; the Anthropic provider is wired but commented out in
-  `lib/agent.ts` and is the intended provider for the reviewed deployment.
-- **Invoice/deck layout** is functional and GST-correct but not visually
-  branded — listed as a stretch goal in the brief, not attempted here.
+  `lib/agent.ts` and is the intended provider for the reviewed deployment —
+  Groq's on-demand tier has a 200K tokens/day cap that a live review
+  session can realistically hit.
 - **`viewDraftBill`** returns structured data to the model, but the bill
   summary the owner sees in chat is composed by the model's reply text
   rather than a fixed, Telegram-native formatted table.
@@ -287,11 +345,7 @@ The recorded walkthrough covers, in order:
 - **Single Telegram bot instance, single shop.** No multi-tenant / multi-shop
   support — every chat shares one `Product` catalog by design, matching the
   "one shop, one owner" brief.
-
-## Stretch goals not attempted
-
-Per the brief's §7, none of the following were built (all optional):
-branded/templated invoices, scheduled auto-sent weekly decks, reorder
-suggestions from sales velocity, expiry/batch (FEFO) tracking, voice-note
-ordering, multi-language support, barcode/photo product identification, or
-khata payment reminders.
+- **Outbound Telegram calls have no retry.** `sendMessage` / `sendDocument`
+  in `lib/telegram.ts` do a single `fetch` with no timeout/retry wrapper, so
+  a transient connect timeout to `api.telegram.org` currently drops the
+  reply instead of retrying it.

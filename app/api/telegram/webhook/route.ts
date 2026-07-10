@@ -6,6 +6,14 @@ import { transcribeVoice } from "@/lib/transcribe";
 
 export const maxDuration = 60; // agent turns with multiple tool calls can take a bit
 
+// Recognizes the model provider's rate-limit error (e.g. Groq's
+// "Rate limit reached ... tokens per day" / HTTP 429) so we can tell the
+// owner something actionable instead of a generic failure message.
+function isRateLimitError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /rate limit/i.test(msg) || /\b429\b/.test(msg) || /tokens per day/i.test(msg);
+}
+
 export async function POST(req: NextRequest) {
   // Verify the request really came from Telegram, not a random POST to
   // our public webhook URL.
@@ -68,7 +76,14 @@ export async function POST(req: NextRequest) {
     await sendMessage(chatId, reply);
   } catch (err) {
     console.error("Agent turn failed:", err);
-    await sendMessage(chatId, "Something went wrong handling that — please try again.");
+    if (isRateLimitError(err)) {
+      await sendMessage(
+        chatId,
+        "⏳ I've hit my AI usage limit for the moment — please try again in a few minutes."
+      );
+    } else {
+      await sendMessage(chatId, "Something went wrong handling that — please try again.");
+    }
   }
 
   // Always return 200 fast so Telegram doesn't consider this a failed
