@@ -1,3 +1,4 @@
+import { Prisma } from "@prisma/client";
 import { db } from "./db";
 
 /**
@@ -13,10 +14,13 @@ export async function claimUpdateOnce(updateId: string | number): Promise<boolea
   try {
     await db.processedUpdate.create({ data: { updateId: String(updateId) } });
     return true; // first time seeing this update — go ahead and process it
-  } catch (err: any) {
-    if (err?.code === "P2002") {
-      // Unique constraint violation => duplicate delivery, already processed
-      return false;
+  } catch (err: unknown) {
+    // Prisma throws a PrismaClientKnownRequestError for unique constraint violations
+    if (err instanceof Prisma.PrismaClientKnownRequestError) {
+      if (err.code === "P2002") {
+        // Unique constraint violation => duplicate delivery, already processed
+        return false;
+      }
     }
     throw err;
   }
