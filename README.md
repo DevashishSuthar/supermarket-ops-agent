@@ -74,6 +74,9 @@ production/reviewed deployment.
 4. `/new` is special-cased at the route level only to clear short-term
    conversation history (`resetConversationHistory`) — it does **not** touch
    the `Preference` table, which is the whole point of hard part #9.
+   `/start` is also special-cased with a fixed welcome message so Telegram's
+   auto-sent `/start` on first contact doesn't get passed to the model as
+   an un-scoped free-text message.
 5. Everything else — the raw message text — is handed to `runAgentTurn`,
    which:
    - loads this chat's standing preferences from Postgres and injects them
@@ -184,6 +187,10 @@ Modeled with a real kirana store in mind, not a generic "products" table:
    prompt. `/new` clears `ConversationState.history` only — `Preference` rows
    are never touched, so standing preferences (default payment mode,
    preferred brand, shop name/GSTIN) survive a fresh chat by construction.
+   Shop identity fields specifically (`shopName`/`shopGstin`/`shopAddress`
+   preference keys) override the `SHOP_NAME`/`SHOP_GSTIN`/`SHOP_ADDRESS` env
+   defaults when generating an invoice, so an owner can correct their GSTIN
+   from chat without redeploying
 
 ---
 
@@ -223,14 +230,18 @@ token from [@BotFather](https://t.me/BotFather), and a publicly reachable URL
 
 ```bash
 DATABASE_URL=postgres://...              # Postgres connection string
+DATABASE_DIRECT_URL=postgres://...       # Direct (non-pooled) connection — required by prisma.config.ts for db push/migrate/seed
 TELEGRAM_BOT_TOKEN=...                   # from @BotFather
 TELEGRAM_WEBHOOK_SECRET=...              # any random string; verified on every webhook call
 PUBLIC_APP_URL=https://your-deployment   # used only by scripts/set-webhook.ts
 SHOP_NAME=My Kirana Store                # printed on invoices
 SHOP_GSTIN=...                           # optional, printed on invoices
 SHOP_ADDRESS=...                         # optional, printed on invoices
+SHOP_BRAND_COLOR=#1a5276                 # optional hex, invoice letterhead color
 GROQ_API_KEY=...                         # current model provider
 # ANTHROPIC_API_KEY=...                  # needed once lib/agent.ts is switched to the Anthropic provider
+CRON_SECRET=...                          # required — Vercel Cron auth for the two cron routes below
+OWNER_CHAT_ID=...                        # required — your Telegram chat id, target for cron-sent messages
 ```
 
 **2. Install, migrate, run:**
@@ -345,7 +356,6 @@ Three of the eight remain unattempted (all optional per §7):
 - **Single Telegram bot instance, single shop.** No multi-tenant / multi-shop
   support — every chat shares one `Product` catalog by design, matching the
   "one shop, one owner" brief.
-- **Outbound Telegram calls have no retry.** `sendMessage` / `sendDocument`
-  in `lib/telegram.ts` do a single `fetch` with no timeout/retry wrapper, so
-  a transient connect timeout to `api.telegram.org` currently drops the
-  reply instead of retrying it.
+- **Outbound Telegram calls retry on transient network failure.** `sendMessage` / `sendDocument` / `downloadVoiceFile` 
+  in `lib/  telegram.ts`  wrap every call in `fetchWithRetry` (3 attempts, 500ms/1s backoff) so 
+  a transient connect timeout to `api.telegram.org` doesn't silently drop a reply.

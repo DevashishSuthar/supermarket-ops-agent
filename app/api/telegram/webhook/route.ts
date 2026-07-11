@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { runAgentTurn, resetConversationHistory } from "@/lib/agent";
+import { runAgentTurn } from "@/lib/agent";
+import { resetConversationHistory } from "@/lib/agent/history";
 import { claimUpdateOnce } from "@/lib/idempotency";
 import { TelegramUpdate, sendMessage, downloadVoiceFile } from "@/lib/telegram";
 import { transcribeVoice } from "@/lib/transcribe";
@@ -67,6 +68,16 @@ export async function POST(req: NextRequest) {
   if (text.trim().toLowerCase() === "/new") {
     await resetConversationHistory(String(chatId));
     await sendMessage(chatId, "Started a new chat. Your standing preferences still apply.");
+    return NextResponse.json({ ok: true });
+  }
+
+  if (text.trim().toLowerCase() === "/start") {
+    await sendMessage(
+      chatId,
+      `Hi! I run ${process.env.SHOP_NAME ?? "your kirana store"} for you, right here in chat. ` +
+      `Just tell me what you need — "50 packets of Maggi came in, cost ₹12", "make a bill: 2kg sugar, 1 Aashirvaad atta", ` +
+      `"what's running out?", "Ramesh's balance?". No menu, no forms — just talk to me plain.`
+    );
     return NextResponse.json({ ok: true });
   }
 
