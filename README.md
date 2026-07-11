@@ -239,7 +239,7 @@ SHOP_GSTIN=...                           # optional, printed on invoices
 SHOP_ADDRESS=...                         # optional, printed on invoices
 SHOP_BRAND_COLOR=#1a5276                 # optional hex, invoice letterhead color
 GROQ_API_KEY=...                         # current model provider
-# ANTHROPIC_API_KEY=...                  # needed once lib/agent.ts is switched to the Anthropic provider
+# AI_GATEWAY_API_KEY=...                  # needed once lib/agent.ts is switched to the Anthropic provider
 CRON_SECRET=...                          # required — Vercel Cron auth for the two cron routes below
 OWNER_CHAT_ID=...                        # required — your Telegram chat id, target for cron-sent messages
 ```

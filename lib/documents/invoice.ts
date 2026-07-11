@@ -177,7 +177,7 @@ export async function generateInvoicePdf(bill: InvoiceBill, shop: ShopInfo): Pro
   const boxX = MARGIN_RIGHT - boxWidth;
   const boxTop = y;
   const lineGap = 16;
-  const boxHeight = lineGap * 4 + 14;
+  const boxHeight = lineGap * 4 + 14 + 8;
   page.drawRectangle({
     x: boxX,
     y: boxTop - boxHeight,
@@ -209,6 +209,7 @@ export async function generateInvoicePdf(bill: InvoiceBill, shop: ShopInfo): Pro
     thickness: 0.75,
     color: LINE,
   });
+  ty -= 8;
   totalsRow("Grand Total", bill.total, true);
 
   // ---------- Footer ----------

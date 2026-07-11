@@ -1,4 +1,3 @@
-// import { anthropic } from "@ai-sdk/anthropic";
 import { groq } from "@ai-sdk/groq";
 import { generateText, tool, stepCountIs } from "ai";
 import { z } from "zod";
@@ -39,11 +38,23 @@ const SHOP_INFO = {
  */
 function buildTools(chatId: string) {
   const wrap = <T>(fn: () => Promise<T>) =>
-    fn().catch((e) => {
-      if (e instanceof ToolError) return { error: e.message };
-      console.error(e);
-      return { error: "Something went wrong on our end — please try again." };
-    });
+    fn()
+      .then((result) => {
+        // Several tools (checkStock, lowStockReport, etc.) return raw Prisma
+        // rows containing Decimal/Date instances, not plain JSON. Those
+        // instances have their own toJSON() (Decimal -> string, Date -> ISO
+        // string), so a JSON round-trip is enough to flatten them safely —
+        // and it's exactly what the model already effectively sees once its
+        // provider serializes the tool result to send over the wire. Doing
+        // it here, once, means every tool's result is guaranteed persistable
+        // to the JSON history column, regardless of which module authored it.
+        return JSON.parse(JSON.stringify(result));
+      })
+      .catch((e) => {
+        if (e instanceof ToolError) return { error: e.message };
+        console.error(e);
+        return { error: "Something went wrong on our end — please try again." };
+      });
 
   return {
     getProduct: tool({
@@ -254,21 +265,44 @@ export async function runAgentTurn(chatId: string, userText: string): Promise<st
   const history = await loadHistory(chatId);
 
   const result = await generateText({
-    // model: anthropic("claude-sonnet-4-6"),
+    // model: "anthropic/claude-sonnet-5",
     model: groq("openai/gpt-oss-120b"),
     system: SYSTEM_PROMPT + prefsBlock,
     messages: [...history, { role: "user", content: userText }],
     tools: buildTools(chatId),
-    stopWhen: stepCountIs(8),
-    // maxSteps: 8, // allows chaining multiple tool calls in one turn (observe -> reason -> act -> repeat)
+    // Raised from 8: a single multi-item bill message (e.g. 6 distinct
+    // products) already needs 6 tool calls + 1 clarifying/summary text =
+    // 7 steps, leaving almost no headroom before the model gets cut off
+    // mid-batch on slightly larger orders.
+    stopWhen: stepCountIs(16),
   });
 
   const replyText = result.text || "Done.";
 
+  if (!result.text) {
+    // A turn that produced tool calls/results but no assistant text is a
+    // silent no-op from the owner's point of view — don't let the "Done."
+    // fallback above hide that this happened. Surface it in logs so a
+    // recurrence (e.g. the model stopping after a clarifying tool error,
+    // or hitting the step budget) is visible instead of masked.
+    console.warn(`[agent] Empty result.text for chat ${chatId} on input: "${userText}"`);
+  }
+
+  // Persist the FULL structured turn (tool calls + tool results + final
+  // text), not just the displayed reply text. Storing only
+  // {role, content: replyText} previously discarded every tool call/result
+  // from the turn, so a follow-up like "Yes" had no memory of what had
+  // already been added to the bill or what was still pending.
+  //
+  // Use `responseMessages` (accumulated across ALL steps), not the
+  // deprecated `response.messages` (which only reflects the FINAL step).
+  // With stepCountIs(16) a single turn can span many tool-call steps, and
+  // `response.messages` would silently drop every step but the last —
+  // reintroducing the exact "missing items" bug this file exists to fix.
   await saveHistory(chatId, [
     ...history,
     { role: "user", content: userText },
-    { role: "assistant", content: replyText },
+    ...result.responseMessages,
   ]);
 
   return replyText;

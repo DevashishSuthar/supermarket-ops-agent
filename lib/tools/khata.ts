@@ -1,5 +1,6 @@
 import { db } from "../db";
 import { ToolError } from "./inventory";
+import { Prisma } from "@prisma/client";
 
 async function findCustomer(name: string) {
   return db.customer.findFirst({ where: { name: { equals: name, mode: "insensitive" } } });
@@ -25,7 +26,13 @@ export async function addCredit(customerName: string, amount: number, note?: str
 }
 
 /**
- * Hard part #7 guardrail: don't settle a khata that doesn't exist.
+ * Hard part #7 guardrail: don't settle a khata that doesn't exist, and
+ * don't let a payment bigger than what's actually owed push the balance
+ * negative (typo'd amount, misheard voice note, etc — "confirm or refuse"
+ * per the brief). The balance is re-read with a row lock INSIDE the
+ * transaction, not just checked up front, so two payments for the same
+ * customer arriving at once can't both pass a stale "is this <= balance"
+ * check the way two sales against the same product could.
  */
 export async function recordPayment(customerName: string, amount: number) {
   if (amount <= 0) throw new ToolError("Payment amount must be positive.");
@@ -33,11 +40,25 @@ export async function recordPayment(customerName: string, amount: number) {
   if (!customer) {
     throw new ToolError(`No khata account found for "${customerName}". Nothing to settle.`);
   }
-  if (Number(customer.balance) <= 0) {
-    throw new ToolError(`${customer.name} has no outstanding balance to pay off.`);
-  }
 
   return db.$transaction(async (tx) => {
+    const rows = await tx.$queryRaw<{ id: string; balance: Prisma.Decimal }[]>`
+      SELECT id, balance FROM "customers" WHERE id = ${customer.id} FOR UPDATE
+    `;
+    if (rows.length === 0) {
+      throw new ToolError(`No khata account found for "${customerName}".`);
+    }
+    const outstanding = Number(rows[0].balance);
+    if (outstanding <= 0) {
+      throw new ToolError(`${customer.name} has no outstanding balance to pay off.`);
+    }
+    if (amount > outstanding) {
+      throw new ToolError(
+        `${customer.name} only owes ₹${outstanding.toFixed(2)} — ₹${amount.toFixed(2)} is more than that. ` +
+        `Confirm the amount with the owner, or record ₹${outstanding.toFixed(2)} to fully settle it.`
+      );
+    }
+
     const updated = await tx.customer.update({
       where: { id: customer.id },
       data: { balance: { decrement: amount } },
