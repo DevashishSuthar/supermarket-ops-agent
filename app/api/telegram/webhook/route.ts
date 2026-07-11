@@ -19,19 +19,16 @@ export async function POST(req: NextRequest) {
   // Verify the request really came from Telegram, not a random POST to
   // our public webhook URL.
   const secret = req.headers.get("x-telegram-bot-api-secret-token");
-  console.log("Received Telegram webhook request with secret:", secret);
   if (secret !== process.env.TELEGRAM_WEBHOOK_SECRET) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
 
   const update: TelegramUpdate = await req.json();
-  console.log("Received Telegram update:", update);
   // Hard part #5 (idempotency): Telegram retries webhook deliveries that
   // don't get a fast 200 OK. We claim the update_id atomically BEFORE
   // doing any work; if it's already claimed, we just ack and stop —
   // no double-processing, no double-reply.
   const isNew = await claimUpdateOnce(update.update_id);
-  console.log(`Update ${update.update_id} is new?`, isNew);
   if (!isNew) {
     return NextResponse.json({ ok: true, deduped: true });
   }
@@ -83,7 +80,6 @@ export async function POST(req: NextRequest) {
 
   try {
     const reply = await runAgentTurn(String(chatId), text);
-    console.log("Agent turn result:", reply);
     await sendMessage(chatId, reply);
   } catch (err) {
     console.error("Agent turn failed:", err);
