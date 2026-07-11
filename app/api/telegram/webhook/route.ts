@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { runAgentTurn, resetConversationHistory } from "@/lib/agent";
+import { runAgentTurn } from "@/lib/agent";
+import { resetConversationHistory } from "@/lib/agent/history";
 import { claimUpdateOnce } from "@/lib/idempotency";
 import { TelegramUpdate, sendMessage, downloadVoiceFile } from "@/lib/telegram";
 import { transcribeVoice } from "@/lib/transcribe";
@@ -18,19 +19,16 @@ export async function POST(req: NextRequest) {
   // Verify the request really came from Telegram, not a random POST to
   // our public webhook URL.
   const secret = req.headers.get("x-telegram-bot-api-secret-token");
-  console.log("Received Telegram webhook request with secret:", secret);
   if (secret !== process.env.TELEGRAM_WEBHOOK_SECRET) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
 
   const update: TelegramUpdate = await req.json();
-  console.log("Received Telegram update:", update);
   // Hard part #5 (idempotency): Telegram retries webhook deliveries that
   // don't get a fast 200 OK. We claim the update_id atomically BEFORE
   // doing any work; if it's already claimed, we just ack and stop —
   // no double-processing, no double-reply.
   const isNew = await claimUpdateOnce(update.update_id);
-  console.log(`Update ${update.update_id} is new?`, isNew);
   if (!isNew) {
     return NextResponse.json({ ok: true, deduped: true });
   }
@@ -70,9 +68,18 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: true });
   }
 
+  if (text.trim().toLowerCase() === "/start") {
+    await sendMessage(
+      chatId,
+      `Hi! I run ${process.env.SHOP_NAME ?? "your kirana store"} for you, right here in chat. ` +
+      `Just tell me what you need — "50 packets of Maggi came in, cost ₹12", "make a bill: 2kg sugar, 1 Aashirvaad atta", ` +
+      `"what's running out?", "Ramesh's balance?". No menu, no forms — just talk to me plain.`
+    );
+    return NextResponse.json({ ok: true });
+  }
+
   try {
     const reply = await runAgentTurn(String(chatId), text);
-    console.log("Agent turn result:", reply);
     await sendMessage(chatId, reply);
   } catch (err) {
     console.error("Agent turn failed:", err);

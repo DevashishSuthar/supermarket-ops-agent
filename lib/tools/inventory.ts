@@ -3,16 +3,52 @@ import { Prisma } from "@prisma/client";
 
 export class ToolError extends Error {}
 
+function normalize(s: string): string {
+  return s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+function tokenize(s: string): string[] {
+  return normalize(s).split(" ").filter(Boolean);
+}
+
+/**
+ * Order- and punctuation-insensitive product lookup.
+ *
+ * Prisma's `contains` is a literal ordered substring check, so a stored
+ * name like "Atta (loose)" would never match an owner typing "loose atta"
+ * or even "atta loose" — different word order, and the "(" breaks the
+ * substring entirely. Kirana catalogs are small (tens to low hundreds of
+ * SKUs), so instead of trying to encode "all these words, any order,
+ * ignore punctuation" in SQL, we pull all products and score them in JS:
+ * every token in the query must appear (as a substring either way) in
+ * some token of the candidate name, and we prefer the tightest match.
+ */
 export async function getProductByNameOrSku(query: string) {
-  const product = await db.product.findFirst({
-    where: {
-      OR: [
-        { sku: { equals: query, mode: "insensitive" } },
-        { name: { contains: query, mode: "insensitive" } },
-      ],
-    },
+  const trimmed = query.trim();
+  if (!trimmed) return null;
+
+  const bySku = await db.product.findFirst({
+    where: { sku: { equals: trimmed, mode: "insensitive" } },
   });
-  return product;
+  if (bySku) return bySku;
+
+  const queryTokens = tokenize(trimmed);
+  if (queryTokens.length === 0) return null;
+
+  const all = await db.product.findMany();
+  let best: { product: (typeof all)[number]; score: number } | null = null;
+
+  for (const p of all) {
+    const nameTokens = tokenize(p.name);
+    const matchedCount = queryTokens.filter((qt) =>
+      nameTokens.some((nt) => nt.includes(qt) || qt.includes(nt))
+    ).length;
+    if (matchedCount !== queryTokens.length) continue; // every query word must hit something
+    const score = matchedCount / nameTokens.length; // prefer the name closest in length to the query
+    if (!best || score > best.score) best = { product: p, score };
+  }
+
+  return best?.product ?? null;
 }
 
 export async function addProduct(input: {
@@ -55,12 +91,20 @@ export async function addProduct(input: {
 export async function receiveStock(input: { productQuery: string; qty: number; costPrice?: number; mrp?: number }) {
   if (input.qty <= 0) throw new ToolError("Quantity received must be positive.");
 
+  // Resolve the product with the same fuzzy, order/punctuation-insensitive
+  // matcher used everywhere else (getProductByNameOrSku), so "atta loose"
+  // and "atta (loose)" resolve identically whether the owner is receiving
+  // stock, billing, or just checking a price. Do this OUTSIDE the
+  // transaction (it's read-only), then take the row lock on the resolved
+  // id inside the transaction for the actual increment.
+  const resolved = await getProductByNameOrSku(input.productQuery);
+  if (!resolved) {
+    throw new ToolError(`No product matching "${input.productQuery}". Add it first with addProduct.`);
+  }
+
   return db.$transaction(async (tx) => {
     const rows = await tx.$queryRaw<{ id: string }[]>`
-      SELECT id FROM "products"
-      WHERE sku ILIKE ${input.productQuery} OR name ILIKE ${'%' + input.productQuery + '%'}
-      LIMIT 1
-      FOR UPDATE
+      SELECT id FROM "products" WHERE id = ${resolved.id} FOR UPDATE
     `;
     if (rows.length === 0) {
       throw new ToolError(`No product matching "${input.productQuery}". Add it first with addProduct.`);

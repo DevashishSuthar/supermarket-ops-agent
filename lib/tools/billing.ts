@@ -179,12 +179,12 @@ export async function finalizeBill(
       }))
     );
 
-    let customerId: string | undefined;
-    if (paymentMode === "CREDIT" as any && customerNameForCredit) {
-      // (khata sales handled via the dedicated addCredit tool instead;
-      // kept here only if you choose to fold "bill on credit" into finalize)
-    }
-
+    // NOTE: "billing on credit" is handled as a separate step — finalize
+    // the bill for cash/UPI/card as usual, then call addCredit for the
+    // amount. `customerNameForCredit` is accepted here for callers that
+    // want to link a bill to a khata customer, but isn't wired to the
+    // Customer relation yet (Bill.customerId stays null) since no hard
+    // part or demo scenario currently requires that link.
     const updated = await tx.bill.update({
       where: { id: bill.id },
       data: {
@@ -192,7 +192,6 @@ export async function finalizeBill(
         paymentMode,
         paymentRef,
         finalizedAt: new Date(),
-        customerId,
         ...summary,
       },
       include: { items: { include: { product: true } } },

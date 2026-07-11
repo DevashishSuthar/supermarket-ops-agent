@@ -94,7 +94,6 @@ export async function generateAnalysisDeck(
     stockSlide.addTable(
       [
         [{ text: "Product", options: { bold: true } }, { text: "Qty Left", options: { bold: true } }, { text: "Reorder Level", options: { bold: true } }],
-        // ...lowStock.map((p) => [p.name, String(p.qty), String(p.reorderLevel)]),
         ...lowStock.map((p) => [
           { text: p.name },
           { text: String(p.qty) },

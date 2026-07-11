@@ -39,11 +39,11 @@ Everything below explains how that's actually built, not just described.
 
 ## Harness — why the Vercel AI SDK
 
-I built this on the **Vercel AI SDK** (`generateText` + `tool()` + `stopWhen: stepCountIs(8)`)
+I built this on the **Vercel AI SDK** (`generateText` + `tool()` + `stopWhen: stepCountIs(16)`)
 rather than the Claude Agent SDK or a deep-agent framework, because:
 
-- It gives an explicit, fully inspectable tool-calling loop — `stepCountIs(8)` lets
-  the model chain multiple tool calls in a single turn (e.g. `addItemToBill` →
+- It gives an explicit, fully inspectable tool-calling loop that lets the model
+  chain multiple tool calls in a single turn (e.g. `addItemToBill` →
   `addItemToBill` → `viewDraftBill` → `finalizeBill`) without me writing any
   orchestration/routing logic myself.
 - It deploys as a single Next.js API route (the Telegram webhook) with no separate
@@ -54,10 +54,11 @@ rather than the Claude Agent SDK or a deep-agent framework, because:
 **Model note:** the bot currently runs on **Groq (`openai/gpt-oss-120b`)** —
 `llama-3.3-70b-versatile` was tried first but was unreliable at emitting real
 structured tool calls (it produced pseudo-XML instead), so `gpt-oss-120b` is
-the working default for cost-free iteration during development. The Anthropic
-provider (`@ai-sdk/anthropic`, `claude-sonnet-4-6`) is already wired in
-`lib/agent.ts` behind a one-line swap and is the intended model for the
-production/reviewed deployment.
+the working default for cost-free iteration during development. Switching to
+Anthropic for the reviewed deployment is a one-line change in
+`lib/agent/index.ts` — the Vercel AI SDK resolves models by string through its
+AI Gateway (`model: "anthropic/claude-sonnet-4.6"`), so no separate
+`@ai-sdk/anthropic` provider package is needed.
 
 ---
 
@@ -74,20 +75,25 @@ production/reviewed deployment.
 4. `/new` is special-cased at the route level only to clear short-term
    conversation history (`resetConversationHistory`) — it does **not** touch
    the `Preference` table, which is the whole point of hard part #9.
-5. Everything else — the raw message text — is handed to `runAgentTurn`,
-   which:
+   `/start` is also special-cased with a fixed welcome message so Telegram's
+   auto-sent `/start` on first contact doesn't get passed to the model as
+   an un-scoped free-text message.
+5. Everything else — the raw message text — is handed to `runAgentTurn`
+   (`lib/agent/index.ts`), which:
    - loads this chat's standing preferences from Postgres and injects them
      into the system prompt as plain facts,
-   - loads the last `MAX_HISTORY_MESSAGES` (20) turns of conversation,
-   - calls `generateText` with the full tool surface and `stopWhen: stepCountIs(8)`.
+   - loads the last `MAX_HISTORY_MESSAGES` (40) messages of conversation,
+     trimmed to a clean turn boundary (`lib/agent/history.ts`),
+   - calls `generateText` with the full tool surface and `stopWhen: stepCountIs(16)`.
 6. The model reasons over the message, calls whichever tools it judges
    necessary — observe → reason → act → feed result back → continue — and
    produces a final natural-language reply.
 7. The reply (or a generated PDF/PPTX file) is sent back to the chat via the
-   Telegram Bot API, and the turn is appended to conversation history.
+   Telegram Bot API, and the full turn (including every tool call/result, not
+   just the final text) is appended to conversation history.
 
 **There is no keyword/regex router anywhere in this path** — `route.ts` passes
-raw text straight to the model; `lib/agent.ts` never branches on message content.
+raw text straight to the model; `runAgentTurn` never branches on message content.
 
 ---
 
@@ -100,8 +106,8 @@ composes them rather than relying on one mega-tool:
 |---|---|---|
 | `lib/tools/inventory.ts` | `getProduct`, `addProduct`, `receiveStock`, `lowStockReport` + `decrementStockForSaleTx` | Product master data, stock-in, low-stock alerts, and the row-locked stock decrement used at bill finalize |
 | `lib/tools/billing.ts` | `startBill`, `addItemToBill`, `removeItemFromBill`, `viewDraftBill`, `finalizeBill` | The multi-turn draft bill lifecycle; stock is untouched until finalize |
-| `lib/tools/khata.ts` | `addCredit`, `recordKhataPayment`, `getKhataBalance` | Customer credit ledger, with existence/positive-balance guardrails |
-| `lib/tools/reports.ts` | `dailyClose`, `salesForRange` | Daily close summary and date-range sales data for the analysis deck |
+| `lib/tools/khata.ts` | `addCredit`, `recordKhataPayment`, `getKhataBalance`, `listOutstandingKhata` | Customer credit ledger, with existence/positive-balance guardrails |
+| `lib/tools/reports.ts` | `dailyClose`, `salesForRange`, `reorderSuggestions` | Daily close summary, date-range sales data for the analysis deck, and velocity-based restock suggestions |
 | `lib/tools/preferences.ts` | `setPreference` / `getPreferences` | The cross-session memory mechanism (hard part #9) |
 | `lib/documents/invoice.ts` | used by `generateInvoicePdf` | Renders a real GST tax-invoice PDF with `pdf-lib` |
 | `lib/documents/deck.ts` | used by `generateAnalysisDeck` | Renders a real `.pptx` with native charts via `pptxgenjs` |
@@ -170,7 +176,10 @@ Modeled with a real kirana store in mind, not a generic "products" table:
    `decrementStockForSaleTx`) runs inside a Prisma transaction using
    `SELECT ... FOR UPDATE`, so a simultaneous sale and stock-in on the same
    product serialize correctly instead of racing on stale reads. This is
-   also why the schema requires Postgres rather than SQLite.
+   also why the schema requires Postgres rather than SQLite. Verified with a
+   standalone script (`scripts/test-concurrency.ts`) that races two sales and
+   a sale-plus-stock-in against the same product directly at the transaction
+   layer, independent of the LLM.
 7. **Guardrails.** `finalizeBill` refuses to sell below cost;
    `recordKhataPayment` refuses to settle an account that doesn't exist or
    has no outstanding balance; there is intentionally **no** "delete stock"
@@ -184,6 +193,10 @@ Modeled with a real kirana store in mind, not a generic "products" table:
    prompt. `/new` clears `ConversationState.history` only — `Preference` rows
    are never touched, so standing preferences (default payment mode,
    preferred brand, shop name/GSTIN) survive a fresh chat by construction.
+   Shop identity fields specifically (`shopName`/`shopGstin`/`shopAddress`
+   preference keys) override the `SHOP_NAME`/`SHOP_GSTIN`/`SHOP_ADDRESS` env
+   defaults when generating an invoice, so an owner can correct their GSTIN
+   from chat without redeploying.
 
 ---
 
@@ -198,8 +211,9 @@ These are capabilities the model composes from tools — not fixed commands.
 | Cut a bill | *"make a bill: 2kg sugar, 1 Aashirvaad atta 5kg, 4 Maggi, 1 Amul butter, UPI"* | `startBill` → `addItemToBill` (×N) → `finalizeBill` |
 | Edit a bill mid-build | *"drop the butter, make it 6 Maggi"* | `removeItemFromBill`, `addItemToBill` |
 | Stock query | *"how much sugar is left?"* | `getProduct` |
-| Low-stock / reorder | *"what's running out?"* | `lowStockReport` |
+| Low-stock / reorder | *"what's running out?"* | `lowStockReport`, `reorderSuggestions` |
 | Credit (khata) | *"put ₹500 on Ramesh's credit" / "Ramesh paid ₹300" / "Ramesh's balance?"* | `addCredit`, `recordKhataPayment`, `getKhataBalance` |
+| Who owes money | *"who owes me money?"* | `listOutstandingKhata` |
 | Daily close | *"today's sales?" / "close the day"* | `dailyClose` |
 | Invoice as PDF | *"send me that bill as a PDF"* | `generateInvoicePdf` |
 | Analysis deck | *"make this week's sales analysis deck"* | `generateAnalysisDeck` (via `salesForRange` + `lowStockReport`) |
@@ -223,14 +237,18 @@ token from [@BotFather](https://t.me/BotFather), and a publicly reachable URL
 
 ```bash
 DATABASE_URL=postgres://...              # Postgres connection string
+DATABASE_DIRECT_URL=postgres://...       # Direct (non-pooled) connection — required by prisma.config.ts for db push/migrate/seed
 TELEGRAM_BOT_TOKEN=...                   # from @BotFather
 TELEGRAM_WEBHOOK_SECRET=...              # any random string; verified on every webhook call
 PUBLIC_APP_URL=https://your-deployment   # used only by scripts/set-webhook.ts
 SHOP_NAME=My Kirana Store                # printed on invoices
 SHOP_GSTIN=...                           # optional, printed on invoices
 SHOP_ADDRESS=...                         # optional, printed on invoices
-GROQ_API_KEY=...                         # current model provider
-# ANTHROPIC_API_KEY=...                  # needed once lib/agent.ts is switched to the Anthropic provider
+SHOP_BRAND_COLOR=#1a5276                 # optional hex, invoice letterhead color
+GROQ_API_KEY=...                         # current model provider + Whisper voice transcription
+AI_GATEWAY_API_KEY=...                   # needed once lib/agent.ts is switched to the Anthropic provider
+CRON_SECRET=...                          # required — Vercel Cron auth for the two cron routes below
+OWNER_CHAT_ID=...                        # required — your Telegram chat id, target for cron-sent messages (get it from @userinfobot)
 ```
 
 **2. Install, migrate, run:**
@@ -239,6 +257,7 @@ GROQ_API_KEY=...                         # current model provider
 pnpm install
 pnpm exec prisma generate
 pnpm run db:push        # pushes prisma/schema.prisma to Postgres
+pnpm run db:seed        # seeds a realistic starter catalog (see prisma/seed.ts)
 pnpm run dev            # local dev server on :3000
 ```
 
@@ -251,6 +270,11 @@ pnpm run set-webhook    # registers PUBLIC_APP_URL/api/telegram/webhook with Tel
 
 **4. Message the bot** — [@StorePilotAIBot](https://t.me/StorePilotAIBot) — and start
 running the store.
+
+**Cron schedules:** `vercel.json` defines the weekly deck and khata-reminder
+crons. Set these to a real weekly cadence (e.g. `0 9 * * 1` for Monday 9am)
+before a production/review deployment — a tight schedule is only useful for
+locally verifying the cron routes fire and auth correctly.
 
 ---
 
@@ -278,13 +302,13 @@ each is a real, wired-in feature, not a stub:
 
 1. **Branded / templated invoice PDFs.** `invoice.ts` draws a colored
    letterhead band and badge using a `brandColor` that's configurable per
-   shop via the `SHOP_BRAND_COLOR` env var (any `#rrggbb` hex, parsed in
-   `lib/agent.ts`'s `parseHexColor`), falling back to a sensible default
+   shop via the `SHOP_BRAND_COLOR` env var (any `#rrggbb` hex, parsed by
+   `parseHexColor` in `lib/utils.ts`), falling back to a sensible default
    teal if unset or malformed. The tax-breakup table, totals box, and
    footer all pick up the same brand color, so it reads as a designed
    invoice rather than a generic table dump.
 2. **Scheduled weekly analysis deck, auto-sent.** `app/api/cron/weekly-deck/route.ts`
-   is triggered by Vercel Cron (configured in `vercel.json`) once a week. It
+   is triggered by Vercel Cron (configured in `vercel.json`). It
    authenticates the incoming request via the `Authorization: Bearer
    <CRON_SECRET>` header Vercel automatically sends, builds the same
    `generateAnalysisDeck` artifact the owner can request on demand, and
@@ -331,10 +355,9 @@ Three of the eight remain unattempted (all optional per §7):
 ## Known limitations / what I'd harden next
 
 - **Model provider:** currently running on Groq (`openai/gpt-oss-120b`) for
-  cost-free iteration; the Anthropic provider is wired but commented out in
-  `lib/agent.ts` and is the intended provider for the reviewed deployment —
-  Groq's on-demand tier has a 200K tokens/day cap that a live review
-  session can realistically hit.
+  cost-free iteration. Switching to Anthropic for the reviewed deployment is
+  just the `model:` line in `lib/agent/index.ts` — Groq's on-demand tier has
+  a 200K tokens/day cap that a live review session can realistically hit.
 - **`viewDraftBill`** returns structured data to the model, but the bill
   summary the owner sees in chat is composed by the model's reply text
   rather than a fixed, Telegram-native formatted table.
@@ -345,7 +368,7 @@ Three of the eight remain unattempted (all optional per §7):
 - **Single Telegram bot instance, single shop.** No multi-tenant / multi-shop
   support — every chat shares one `Product` catalog by design, matching the
   "one shop, one owner" brief.
-- **Outbound Telegram calls have no retry.** `sendMessage` / `sendDocument`
-  in `lib/telegram.ts` do a single `fetch` with no timeout/retry wrapper, so
-  a transient connect timeout to `api.telegram.org` currently drops the
-  reply instead of retrying it.
+- **Outbound Telegram calls retry on transient network failure.** `sendMessage` /
+  `sendDocument` / `downloadVoiceFile` in `lib/telegram.ts` wrap every call in
+  `fetchWithRetry` (3 attempts, 500ms/1s backoff) so a transient connect
+  timeout to `api.telegram.org` doesn't silently drop a reply.
