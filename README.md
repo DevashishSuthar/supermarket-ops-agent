@@ -51,14 +51,22 @@ rather than the Claude Agent SDK or a deep-agent framework, because:
 - It's a listed "or equivalent" harness in the brief, and lets me reuse a stack
   (Next.js + TypeScript + Prisma) I already run in production elsewhere.
 
-**Model note:** the bot currently runs on **Groq (`openai/gpt-oss-120b`)** —
-`llama-3.3-70b-versatile` was tried first but was unreliable at emitting real
-structured tool calls (it produced pseudo-XML instead), so `gpt-oss-120b` is
-the working default for cost-free iteration during development. Switching to
-Anthropic for the reviewed deployment is a one-line change in
-`lib/agent/index.ts` — the Vercel AI SDK resolves models by string through its
-AI Gateway (`model: "anthropic/claude-sonnet-4.6"`), so no separate
-`@ai-sdk/anthropic` provider package is needed.
+**Model note:** `lib/agent/index.ts` picks the model per environment —
+`groq("openai/gpt-oss-120b")` when `NODE_ENV !== "production"`, and
+`"anthropic/claude-sonnet-5"` in production:
+
+```ts
+model: isProduction
+  ? "anthropic/claude-sonnet-5"
+  : groq("openai/gpt-oss-120b"),
+```
+
+Groq is the dev-time default for cost-free iteration (`llama-3.3-70b-versatile`
+was tried first but was unreliable at emitting real structured tool calls — it
+produced pseudo-XML instead — so `gpt-oss-120b` replaced it). The Anthropic
+model is resolved by string through the Vercel AI SDK's AI Gateway, so no
+separate `@ai-sdk/anthropic` provider package is needed — only the
+`AI_GATEWAY_API_KEY` env var.
 
 ---
 
@@ -233,10 +241,10 @@ row locking is required, so it must be Postgres, not SQLite), a Telegram bot
 token from [@BotFather](https://t.me/BotFather), and a publicly reachable URL
 (Vercel in production, `ngrok` for local testing).
 
-**1. Environment variables** (no `.env.example` is checked in — create `.env` with):
+**1. Environment variables** — copy `.env.example` to `.env` and fill in real values:
 
 ```bash
-DATABASE_URL=postgres://...              # Postgres connection string
+DATABASE_URL=postgres://...              # Postgres connection string (pooled, used at runtime)
 DATABASE_DIRECT_URL=postgres://...       # Direct (non-pooled) connection — required by prisma.config.ts for db push/migrate/seed
 TELEGRAM_BOT_TOKEN=...                   # from @BotFather
 TELEGRAM_WEBHOOK_SECRET=...              # any random string; verified on every webhook call
@@ -245,8 +253,8 @@ SHOP_NAME=My Kirana Store                # printed on invoices
 SHOP_GSTIN=...                           # optional, printed on invoices
 SHOP_ADDRESS=...                         # optional, printed on invoices
 SHOP_BRAND_COLOR=#1a5276                 # optional hex, invoice letterhead color
-GROQ_API_KEY=...                         # current model provider + Whisper voice transcription
-AI_GATEWAY_API_KEY=...                   # needed once lib/agent.ts is switched to the Anthropic provider
+GROQ_API_KEY=...                         # dev-time model provider + Whisper voice transcription (retained in every environment — Whisper has no Anthropic equivalent)
+AI_GATEWAY_API_KEY=...                   # required in production — Vercel AI Gateway credential the SDK uses to resolve "anthropic/claude-sonnet-5" in lib/agent/index.ts
 CRON_SECRET=...                          # required — Vercel Cron auth for the two cron routes below
 OWNER_CHAT_ID=...                        # required — your Telegram chat id, target for cron-sent messages (get it from @userinfobot)
 ```
@@ -271,10 +279,11 @@ pnpm run set-webhook    # registers PUBLIC_APP_URL/api/telegram/webhook with Tel
 **4. Message the bot** — [@StorePilotAIBot](https://t.me/StorePilotAIBot) — and start
 running the store.
 
-**Cron schedules:** `vercel.json` defines the weekly deck and khata-reminder
-crons. Set these to a real weekly cadence (e.g. `0 9 * * 1` for Monday 9am)
-before a production/review deployment — a tight schedule is only useful for
-locally verifying the cron routes fire and auth correctly.
+**Cron schedules:** `vercel.json` currently runs both crons **daily**
+(`30 3 * * *` for the deck, `0 4 * * *` for khata reminders) rather than
+weekly, so their behavior is easy to verify without waiting a week. Set these
+to a real weekly cadence (e.g. `0 9 * * 1` for Monday 9am) before a
+long-running production deployment.
 
 ---
 
@@ -354,10 +363,6 @@ Three of the eight remain unattempted (all optional per §7):
 
 ## Known limitations / what I'd harden next
 
-- **Model provider:** currently running on Groq (`openai/gpt-oss-120b`) for
-  cost-free iteration. Switching to Anthropic for the reviewed deployment is
-  just the `model:` line in `lib/agent/index.ts` — Groq's on-demand tier has
-  a 200K tokens/day cap that a live review session can realistically hit.
 - **`viewDraftBill`** returns structured data to the model, but the bill
   summary the owner sees in chat is composed by the model's reply text
   rather than a fixed, Telegram-native formatted table.
