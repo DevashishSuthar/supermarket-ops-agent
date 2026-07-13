@@ -27,6 +27,8 @@ const SHOP_INFO = {
   brandColor: parseHexColor(process.env.SHOP_BRAND_COLOR),
 };
 
+const isProduction = process.env.NODE_ENV === "production";
+
 /**
  * Agent-first design: EVERY one of these tools is a thin, single-purpose
  * function. There is no keyword router deciding "this is a billing
@@ -263,10 +265,10 @@ export async function runAgentTurn(chatId: string, userText: string): Promise<st
       : "";
 
   const history = await loadHistory(chatId);
-
   const result = await generateText({
-    // model: "anthropic/claude-sonnet-5",
-    model: groq("openai/gpt-oss-120b"),
+    model: isProduction
+      ? "anthropic/claude-sonnet-5" // Vercel AI (Anthropic)
+      : groq("openai/gpt-oss-120b"), // Groq for local/dev
     system: SYSTEM_PROMPT + prefsBlock,
     messages: [...history, { role: "user", content: userText }],
     tools: buildTools(chatId),
